@@ -95,6 +95,14 @@ ask-grok --discard add-median
 
 See [docs/FINDINGS.md](docs/FINDINGS.md). It covers the Gemini CLI retirement, agy reporting timeouts as success, Grok's shared weekly usage pool, Windows PATH and execution-policy traps, and more.
 
+## Status
+
+**Last verified: 3 November 2026.** Tested on Windows 11 with Git Bash, Claude Code 2.1.210, agy 1.4.12 and grok 1.0.70.
+
+- **Working:** read, review and code tasks for both helpers; worktree mode; quota, timeout and model-error detection; the 5-hour quota memory.
+- **Help wanted: macOS and Linux.** The scripts include fallbacks but haven't been run there. Please open an issue with what you find.
+- **Expect drift.** Model names (`gemini-3.8-flash-*`, `grok-4.7*`), CLI flags and plan limits change often. If a call starts failing, check `agy --help` and `grok --help` against [docs/FINDINGS.md](docs/FINDINGS.md), and send a PR with the date you verified it.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
