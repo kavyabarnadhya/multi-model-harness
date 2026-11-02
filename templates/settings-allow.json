@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ask-gemini:*)",
+      "Bash(ask-grok:*)",
+      "Bash(git diff:*)"
+    ]
+  }
+}

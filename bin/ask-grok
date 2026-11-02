@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# ask-grok: one-shot, read-only task through Grok Build (grok) on the X subscription.
+
+HELPER=grok
+LIBDIR=$(dirname "$(readlink -f "$0")")
+. "$LIBDIR/helper-lib.sh"
+# Works even if the app was started before the installer added grok to PATH.
+PATH="$HOME/.grok/bin:$PATH"
+
+usage() {
+  usage_common
+  echo "Models: review/code grok-4.7, read grok-4.7-build-fast (grok models lists more)"
+}
+
+parse_args "$@"
+check_remembered
+[ -n "$WORKTREE" ] && wt_setup
+sanitize_env
+command -v grok > /dev/null || die_error "grok not found in ~/.grok/bin or PATH"
+
+case "$TASK" in
+  read) MODEL=${MODEL:-grok-4.7-build-fast} ;;
+  *)    MODEL=${MODEL:-grok-4.7} ;;
+esac
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+# Plan permission mode keeps grok from editing files or running commands. In a worktree, edits are allowed
+# by a rule scoped to that folder: acceptEdits alone still blocks headless edits, and unscoped rules or
+# --sandbox (not enforced on Windows) let grok write anywhere.
+if [ -n "$WORKTREE" ]; then
+  args=(--permission-mode default --allow "Edit($(cygpath -m "$CWD")/**)")
+else
+  args=(--permission-mode plan)
+fi
+args+=(--output-format plain -m "$MODEL" --cwd "$(cygpath -w "$CWD")")
+if [ ${#PROMPT} -gt "$HELPER_ARG_LIMIT" ]; then
+  printf '%s' "$PROMPT" > "$work/prompt.md"
+  args+=(--prompt-file "$(cygpath -w "$work/prompt.md")")
+else
+  args+=(-p "$PROMPT")
+fi
+
+timeout -k 10 "$TIMEOUT" grok "${args[@]}" < /dev/null > "$work/out" 2> "$work/err"
+rc=$?
+case $rc in 124|137) die_unavailable timeout ;; esac
+
+if [ $rc -eq 0 ] && [ -n "$(tr -d '[:space:]' < "$work/out")" ]; then
+  echo "[grok: $MODEL]"
+  cat "$work/out"
+  [ -n "$WORKTREE" ] && { echo; wt_finish; }
+  exit 0
+fi
+handle_failure "$(cat "$work/out" "$work/err")" "$(first_line "$work/err" "$work/out")"

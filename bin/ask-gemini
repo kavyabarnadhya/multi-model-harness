@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# ask-gemini: one-shot, read-only task through Antigravity CLI (agy) on the Google AI Pro plan.
+# (Gemini CLI no longer accepts AI Pro sign-in; agy is Google's replacement.)
+
+HELPER=gemini
+LIBDIR=$(dirname "$(readlink -f "$0")")
+. "$LIBDIR/helper-lib.sh"
+AGY="${AGY_BIN:-$(command -v agy || echo "$HOME/.gemini/bin/agy.exe")}"
+
+usage() {
+  usage_common
+  echo "Models: review/code gemini-3.8-flash-high, read gemini-3.8-flash-medium (agy models lists more)"
+}
+
+parse_args "$@"
+check_remembered
+[ -n "$WORKTREE" ] && wt_setup
+sanitize_env
+[ -x "$AGY" ] || die_error "agy not found at $AGY"
+
+case "$TASK" in
+  read) MODEL=${MODEL:-gemini-3.8-flash-medium} ;;
+  *)    MODEL=${MODEL:-gemini-3.8-flash-high} ;;
+esac
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+# --mode plan keeps agy from editing files (accept-edits only inside a worktree);
+# the per-run settings forbid paid G1 credits.
+mode=plan
+[ -n "$WORKTREE" ] && mode=accept-edits
+args=(--output-format json --model "$MODEL" --mode "$mode"
+      --settings '{"useG1Credits":false}' --print-timeout "${TIMEOUT}s")
+if [ ${#PROMPT} -gt "$HELPER_ARG_LIMIT" ]; then
+  printf '%s' "$PROMPT" > "$work/prompt.md"
+  args+=(--add-dir "$(cygpath -w "$work")")
+  PROMPT="Your full instructions are in the file $(cygpath -w "$work/prompt.md"). Read that file and follow it."
+fi
+
+cd "$CWD" || die_error "cannot enter $CWD"
+timeout -k 10 $((TIMEOUT + 30)) "$AGY" -p "$PROMPT" "${args[@]}" < /dev/null > "$work/out" 2> "$work/err"
+rc=$?
+case $rc in 124|137) die_unavailable timeout ;; esac
+
+# Pull status, finished_reason and error out of agy's JSON; the response goes to its own file.
+meta=$(node -e '
+  const fs = require("fs");
+  const [out, resp] = process.argv.slice(1);
+  let j;
+  try { j = JSON.parse(fs.readFileSync(out, "utf8")); } catch { console.log("PARSEFAIL"); process.exit(0); }
+  fs.writeFileSync(resp, j.response || "");
+  console.log([j.status || "", j.finished_reason || "", String(j.error || "").split("\n")[0]].join("\t"));
+' "$(cygpath -w "$work/out")" "$(cygpath -w "$work/resp")")
+IFS=$'\t' read -r status finished err <<< "$meta"
+
+if [ "$status" = SUCCESS ] && [ "$finished" != print_timeout ] && [ -n "$(tr -d '[:space:]' < "$work/resp")" ]; then
+  echo "[gemini: agy $MODEL]"
+  cat "$work/resp"
+  [ -n "$WORKTREE" ] && { echo; wt_finish; }
+  exit 0
+fi
+[ "$finished" = print_timeout ] && die_unavailable timeout
+handle_failure "$(cat "$work/out" "$work/err")" "${err:-$(first_line "$work/err" "$work/out")}"
