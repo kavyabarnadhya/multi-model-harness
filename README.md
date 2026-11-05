@@ -48,7 +48,7 @@ Either helper is optional. If you only have one, the fallback rules still work.
      Then run `grok login` and choose the account that holds your subscription. Afterwards, `grok models` should list models.
 2. **Install the wrappers.** Use any folder on Git Bash's PATH; `~/bin` is on it by default.
    ```bash
-   mkdir -p ~/bin && cp bin/* ~/bin/ && chmod +x ~/bin/ask-gemini ~/bin/ask-grok
+   mkdir -p ~/bin && cp bin/* ~/bin/ && chmod +x ~/bin/ask-gemini ~/bin/ask-grok ~/bin/helper-smoke
    ask-gemini --status && ask-grok --status
    ```
 3. **Try a call each:**
@@ -68,13 +68,15 @@ New Claude Code sessions pick up the rules. Override them per repo in that repo'
 ask-<helper> [--task review|read|code] [--cwd DIR] [--timeout SECONDS] [--model ID] PROMPT...
 ask-<helper> --task code --worktree NAME [--cwd REPO] PROMPT...
 ask-<helper> --list-worktrees | --discard NAME   [--cwd REPO]
-ask-<helper> --status | --reset
+ask-<helper> --status | --reset          (add --effort low|medium|high to change thinking effort)
+helper-smoke                                 (end-to-end check of both helpers, under 2 min)
 ```
 
 - Piped input is appended to the prompt.
 - Prompts over 24 KB go through a file, because Windows caps command lines near 32 K characters.
-- The first output line names the helper and model, e.g. `[grok: grok-4.7]`.
-- Default models are set at the top of each wrapper (`gemini-3.8-flash-*`, `grok-4.7*`). Run `agy models` and `grok models` to see what your plan offers.
+- The first output line names the helper and model, e.g. `[grok: grok-4.5]`.
+- Default models: `grok-4.5` and `gemini-3.8-flash-low`. They were the only ones fast enough on real-sized input in testing (see [findings](docs/FINDINGS.md)). Override with `--model`.
+- Every run keeps a log in `~/.cache/ask-helpers/runs/`, and a failure prints `LOG: <folder>`. A Grok run that streams nothing for 180 s is stopped as stuck. Run `agy models` and `grok models` to see what your plan offers.
 
 Worktree flow, as Claude follows it from CLAUDE.md:
 ```bash
@@ -97,11 +99,11 @@ See [docs/FINDINGS.md](docs/FINDINGS.md). It covers the Gemini CLI retirement, a
 
 ## Status
 
-**Last verified: 3 November 2026.** Tested on Windows 11 with Git Bash, Claude Code 2.1.210, agy 1.4.12 and grok 1.0.70.
+**Last verified: 5 November 2026.** Tested on Windows 11 with Git Bash, Claude Code 2.1.210, agy 1.5.1 and grok 1.0.70.
 
 - **Working:** read, review and code tasks for both helpers; worktree mode; quota, timeout and model-error detection; the 5-hour quota memory.
 - **Help wanted: macOS and Linux.** The scripts include fallbacks but haven't been run there. Please open an issue with what you find.
-- **Expect drift.** Model names (`gemini-3.8-flash-*`, `grok-4.7*`), CLI flags and plan limits change often. If a call starts failing, check `agy --help` and `grok --help` against [docs/FINDINGS.md](docs/FINDINGS.md), and send a PR with the date you verified it.
+- **Expect drift.** Model names and speeds (agy auto-updates itself), CLI flags and plan limits change often. If a call starts failing, check `agy --help` and `grok --help` against [docs/FINDINGS.md](docs/FINDINGS.md), and send a PR with the date you verified it.
 
 ## License
 

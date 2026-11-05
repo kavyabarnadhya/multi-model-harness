@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# helper-smoke: quick end-to-end check of ask-gemini and ask-grok.
+# For each helper: a tiny read-only review, then a worktree code task that must create a one-file diff.
+# Usage: helper-smoke [gemini|grok ...]   (default: both)
+
+helpers=("$@")
+[ ${#helpers[@]} -eq 0 ] && helpers=(gemini grok)
+repo="$HOME/wt/_smoke-repo"   # short path on purpose: agy hangs in very long paths
+fails=0
+
+rm -rf "$repo"
+mkdir -p "$repo" && cd "$repo" || exit 1
+git init -q && echo "smoke test repo" > README.md && git add README.md \
+  && git -c user.name=smoke -c user.email=smoke@localhost commit -qm init || exit 1
+
+check() { # <label> <seconds limit> <command...>
+  local label=$1 limit=$2; shift 2
+  local s out rc t
+  s=$(date +%s)
+  out=$("$@" 2>&1); rc=$?
+  t=$(( $(date +%s) - s ))
+  if [ $rc -eq 0 ] && [ $t -le "$limit" ]; then
+    echo "PASS $label (${t}s)"
+  else
+    echo "FAIL $label (exit $rc, ${t}s, limit ${limit}s)"
+    printf '%s\n' "$out" | sed 's/^/    /' | head -8
+    fails=$((fails + 1))
+  fi
+  LAST_OUT=$out
+}
+
+for h in "${helpers[@]}"; do
+  check "$h review" 120 bash -c "echo 'def add(a, b): return a - b' | ask-$h --task review --cwd '$repo' --timeout 110 'One sentence: is there a bug?'"
+  check "$h worktree code" 120 ask-$h --task code --worktree smoke --cwd "$repo" --timeout 110 "Create a file hello.txt containing the single word hi."
+  if printf '%s' "$LAST_OUT" | grep -q 'hello.txt'; then
+    files=$(git -C "$repo" diff --name-only HEAD "helper/smoke" 2> /dev/null)
+    [ "$files" = hello.txt ] && echo "PASS $h diff is exactly hello.txt" || { echo "FAIL $h diff: ${files:-none}"; fails=$((fails + 1)); }
+  fi
+  ask-$h --discard smoke --cwd "$repo" > /dev/null 2>&1
+done
+
+cd "$HOME" && rm -rf "$repo"
+[ $fails -eq 0 ] && echo "ALL PASS" || echo "$fails FAILED"
+exit $((fails > 0))

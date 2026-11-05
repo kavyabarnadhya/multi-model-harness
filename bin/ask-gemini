@@ -18,20 +18,24 @@ check_remembered
 sanitize_env
 [ -x "$AGY" ] || die_error "agy not found at $AGY"
 
-case "$TASK" in
-  read) MODEL=${MODEL:-gemini-3.8-flash-medium} ;;
-  *)    MODEL=${MODEL:-gemini-3.8-flash-high} ;;
-esac
+# Effort is part of agy's model id. On a 350-line review Flash-low took 20 s, medium 7 min (63K thinking
+# tokens) and high over 5 min with no answer (tested 5 Nov 2026), so low is the default.
+[ -n "$EFFORT" ] && MODEL=${MODEL:-gemini-3.8-flash-$EFFORT}
+MODEL=${MODEL:-gemini-3.8-flash-low}
 
-work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
+new_run_dir
+# agy streams no thinking events, so silence is normal for it; only the overall timeout applies.
+IDLE_LIMIT=$TIMEOUT
 
 # --mode plan keeps agy from editing files (accept-edits only inside a worktree);
 # the per-run settings forbid paid G1 credits.
 mode=plan
 [ -n "$WORKTREE" ] && mode=accept-edits
-args=(--output-format json --model "$MODEL" --mode "$mode"
-      --settings '{"useG1Credits":false}' --print-timeout "${TIMEOUT}s")
+# A denied tool ends a headless agy turn with no output, and agy likes to check its work with git, so
+# read-only git commands are pre-allowed. Everything else that needs approval stays denied.
+settings='{"useG1Credits":false,"permissions":{"allow":["command(git diff*)","command(git status*)","command(git log*)","command(git show*)"]}}'
+args=(--output-format stream-json --model "$MODEL" --mode "$mode"
+      --settings "$settings" --print-timeout "${TIMEOUT}s")
 if [ ${#PROMPT} -gt "$HELPER_ARG_LIMIT" ]; then
   printf '%s' "$PROMPT" > "$work/prompt.md"
   args+=(--add-dir "$(cygpath -w "$work")")
@@ -39,26 +43,34 @@ if [ ${#PROMPT} -gt "$HELPER_ARG_LIMIT" ]; then
 fi
 
 cd "$CWD" || die_error "cannot enter $CWD"
-timeout -k 10 $((TIMEOUT + 30)) "$AGY" -p "$PROMPT" "${args[@]}" < /dev/null > "$work/out" 2> "$work/err"
-rc=$?
-case $rc in 124|137) die_unavailable timeout ;; esac
+# agy's own --print-timeout ends the turn cleanly; the outer limit is only a backstop.
+TIMEOUT=$((TIMEOUT + 30)) run_watched "$AGY" -p "$PROMPT" "${args[@]}"
+[ "$RUN_END" = timeout ] && die_unavailable "timeout after $((TIMEOUT + 30))s"
 
-# Pull status, finished_reason and error out of agy's JSON; the response goes to its own file.
+# The final "result" event carries status, finished_reason, error and the response.
 meta=$(node -e '
   const fs = require("fs");
   const [out, resp] = process.argv.slice(1);
-  let j;
-  try { j = JSON.parse(fs.readFileSync(out, "utf8")); } catch { console.log("PARSEFAIL"); process.exit(0); }
-  fs.writeFileSync(resp, j.response || "");
-  console.log([j.status || "", j.finished_reason || "", String(j.error || "").split("\n")[0]].join("\t"));
+  let r = null;
+  for (const line of fs.readFileSync(out, "utf8").split("\n")) {
+    try { const e = JSON.parse(line); if (e.event === "result") r = e.result; } catch {}
+  }
+  if (!r) { console.log("NORESULT"); process.exit(0); }
+  fs.writeFileSync(resp, r.response || "");
+  console.log([r.status || "", r.finished_reason || "", String(r.error || "").split("\n").join(" ")].join("\t"));
 ' "$(cygpath -w "$work/out")" "$(cygpath -w "$work/resp")")
 IFS=$'\t' read -r status finished err <<< "$meta"
+run_note "result: status=$status finished=$finished"
 
-if [ "$status" = SUCCESS ] && [ "$finished" != print_timeout ] && [ -n "$(tr -d '[:space:]' < "$work/resp")" ]; then
+[ "$finished" = print_timeout ] && die_unavailable "timeout after ${TIMEOUT}s"
+# agy 1.5 plan mode can stop after writing a plan.md and asking to "Proceed" instead of answering.
+if grep -qiE 'click \*\*proceed\*\*|/brain/[^)]*plan\.md' "$work/resp" 2> /dev/null && [ -z "$WORKTREE" ]; then
+  die_error "agy returned a plan instead of an answer; rephrase the request as a question"
+fi
+if [ "$status" = SUCCESS ] && [ -n "$(tr -d '[:space:]' < "$work/resp")" ]; then
   echo "[gemini: agy $MODEL]"
-  cat "$work/resp"
+  cat "$work/resp"; echo
   [ -n "$WORKTREE" ] && { echo; wt_finish; }
   exit 0
 fi
-[ "$finished" = print_timeout ] && die_unavailable timeout
-handle_failure "$(cat "$work/out" "$work/err")" "${err:-$(first_line "$work/err" "$work/out")}"
+handle_failure "$err $(cat "$work/err")" "${err:-$(first_line "$work/err")}"

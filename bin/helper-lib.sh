@@ -11,8 +11,12 @@ QUOTA_TTL=$((5 * 3600))
 RATE_TTL=$((15 * 60))
 AUTH_TTL=$((365 * 24 * 3600))   # effectively "until --reset"
 
-die_unavailable() { wt_abort; echo "HELPER_UNAVAILABLE: $HELPER ($1)"; exit 3; }
-die_error()       { wt_abort; echo "HELPER_ERROR: $HELPER ($1)"; exit 4; }
+IDLE_LIMIT=${HELPER_IDLE_LIMIT:-180}   # seconds with no helper output before the run counts as stuck
+RUNS_KEPT=30
+
+die_unavailable() { wt_abort; echo "HELPER_UNAVAILABLE: $HELPER ($1)"; log_hint; exit 3; }
+die_error()       { wt_abort; echo "HELPER_ERROR: $HELPER ($1)"; log_hint; exit 4; }
+log_hint() { [ -n "${work:-}" ] && [ -d "$work" ] && echo "LOG: $(cygpath -w "$work")"; }
 # A failed run must not leave a half-made worktree behind.
 wt_abort() { [ -n "${WT_CREATED:-}" ] && { WT_CREATED=""; wt_remove; }; }
 
@@ -81,8 +85,53 @@ handle_failure() { # <all output> <one-line detail>
     rate-limit) state_set "$RATE_TTL" rate-limit;  die_unavailable rate-limit ;;
     auth)       state_set "$AUTH_TTL" auth;        die_unavailable auth ;;
     model-unavailable) die_unavailable "model-unavailable: $MODEL" ;;
-    *)          die_error "$(printf '%s' "$2" | sed 's/^Error: *//' | cut -c1-200)" ;;
+    *)          die_error "$(short_detail "$2")" ;;
   esac
+}
+
+# --- run logs and the stuck-run watchdog ---
+
+# Each run keeps its prompt, raw output and result in its own folder, so a failure can be inspected.
+new_run_dir() {
+  local runs="$HELPER_STATE_DIR/runs"
+  mkdir -p "$runs"
+  work="$runs/$(date +%Y%m%d-%H%M%S)-$HELPER-$TASK${WORKTREE:+-$WORKTREE}-$$"
+  mkdir -p "$work"
+  printf '%s' "$PROMPT" > "$work/prompt.txt"
+  ls -1d "$runs"/*/ 2> /dev/null | sort | head -n -"$RUNS_KEPT" | while read -r old; do rm -rf "$old"; done
+}
+
+run_note() { echo "$(date +%H:%M:%S) $*" >> "$work/run.txt"; }
+
+# run_watched CMD...: stdout -> $work/out, stderr -> $work/err. Stops the run at $TIMEOUT seconds, or
+# after $IDLE_LIMIT seconds in which neither file grew. Sets RUN_RC and RUN_END (ok|timeout|stuck).
+run_watched() {
+  run_note "start: ${*:1:1} (timeout ${TIMEOUT}s, idle limit ${IDLE_LIMIT}s)"
+  timeout -k 10 "$TIMEOUT" "$@" < /dev/null > "$work/out" 2> "$work/err" &
+  local pid=$! start now last_size size last_change
+  start=$(date +%s); last_change=$start; last_size=0
+  while kill -0 "$pid" 2> /dev/null; do
+    sleep 2
+    now=$(date +%s)
+    size=$(( $(wc -c < "$work/out") + $(wc -c < "$work/err") ))
+    if [ "$size" -ne "$last_size" ]; then last_size=$size; last_change=$now; fi
+    if [ $((now - last_change)) -ge "$IDLE_LIMIT" ]; then
+      run_note "stuck: no output for ${IDLE_LIMIT}s, stopping"
+      kill "$pid" 2> /dev/null; wait "$pid" 2> /dev/null
+      RUN_RC=124; RUN_END=stuck; return
+    fi
+  done
+  wait "$pid"; RUN_RC=$?
+  case $RUN_RC in 124|137) RUN_END=timeout ;; *) RUN_END=ok ;; esac
+  run_note "end: rc=$RUN_RC ($RUN_END) after $(( $(date +%s) - start ))s"
+}
+
+# One line of error detail; mark a cut with "..." so it never looks like the message ended there.
+short_detail() {
+  local d
+  d=$(printf '%s' "$1" | sed 's/^Error: *//' | tr -s '\r\n' ' ')
+  [ ${#d} -gt 400 ] && d="${d:0:400}..."
+  printf '%s' "$d"
 }
 
 first_line() { cat "$@" 2>/dev/null | grep -m1 -v '^[[:space:]]*$'; }
@@ -90,14 +139,15 @@ first_line() { cat "$@" 2>/dev/null | grep -m1 -v '^[[:space:]]*$'; }
 # --- arguments ---
 
 parse_args() {
-  TASK=read; CWD=$PWD; TIMEOUT=300; MODEL=""; PROMPT=""; WORKTREE=""
+  TASK=read; CWD=$PWD; CWD_GIVEN=""; TIMEOUT=""; MODEL=""; EFFORT=""; PROMPT=""; WORKTREE=""
   local action=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --task)    TASK=$2; shift 2 ;;
-      --cwd)     CWD=$2; shift 2 ;;
+      --cwd)     CWD=$2; CWD_GIVEN=1; shift 2 ;;
       --timeout) TIMEOUT=$2; shift 2 ;;
       --model)   MODEL=$2; shift 2 ;;
+      --effort)  EFFORT=$2; shift 2 ;;
       --worktree) WORKTREE=$2; shift 2 ;;
       --discard) action=discard; WORKTREE=$2; shift 2 ;;
       --list-worktrees) action=list; shift ;;
@@ -110,6 +160,10 @@ parse_args() {
         else
           echo "$HELPER: available"
         fi
+        # Timeouts are not remembered (they depend on the task, not the account), so show the last run too.
+        local last
+        last=$(ls -1d "$HELPER_STATE_DIR/runs/"*-"$HELPER"-*/ 2> /dev/null | sort | tail -1)
+        [ -n "$last" ] && echo "last run: $(basename "$last"): $(grep -E 'end:|stuck:|result:' "$last/run.txt" 2> /dev/null | tail -1 | cut -d' ' -f2-)"
         exit 0 ;;
       -h|--help) usage; exit 0 ;;
       --)        shift; PROMPT="${PROMPT:+$PROMPT }$*"; break ;;
@@ -118,7 +172,10 @@ parse_args() {
     esac
   done
   case "$TASK" in review|read|code) ;; *) die_error "bad --task '$TASK' (review|read|code)" ;; esac
-  case "$TIMEOUT" in ''|*[!0-9]*) die_error "bad --timeout '$TIMEOUT' (seconds)" ;; esac
+  # Defaults per helper and task: DEFAULT_TIMEOUT_CODE / DEFAULT_TIMEOUT_OTHER, set by the wrapper.
+  [ -z "$TIMEOUT" ] && { [ "$TASK" = code ] && TIMEOUT=${DEFAULT_TIMEOUT_CODE:-600} || TIMEOUT=${DEFAULT_TIMEOUT_OTHER:-300}; }
+  case "$TIMEOUT" in *[!0-9]*) die_error "bad --timeout '$TIMEOUT' (seconds)" ;; esac
+  case "$EFFORT" in ''|low|medium|high) ;; *) die_error "bad --effort '$EFFORT' (low|medium|high)" ;; esac
   [ -d "$CWD" ] || die_error "no such directory: $CWD"
   CWD=$(cygpath -u "$CWD")
   case "$action" in
@@ -134,15 +191,21 @@ parse_args() {
     local input
     input=$(cat)
     [ -n "$input" ] && PROMPT="${PROMPT:+$PROMPT$'\n\n'}$input"
+    # Piped content without --cwd: answer from it alone. In a repo, helpers otherwise explore it
+    # (CLAUDE.md, specs, tests) and a slow model runs out of time.
+    if [ -n "$input" ] && [ -z "$CWD_GIVEN" ] && [ -z "$WORKTREE" ]; then
+      CWD="$HELPER_STATE_DIR/empty"
+      mkdir -p "$CWD"
+    fi
   fi
   [ -n "${PROMPT//[[:space:]]/}" ] || die_error "empty prompt"
   # Shell commands are denied in headless runs; without this the helper may try one and return nothing.
   if [ -n "$WORKTREE" ]; then
-    PROMPT="You are a coding helper called by another coding agent. Make the requested changes by editing files in the current working directory only; never write anywhere else. Do not run shell commands. When done, reply with a short summary of what you changed.
+    PROMPT="You are a coding helper called by another coding agent. Make the requested changes by editing files in the current working directory only; never read or write anywhere else. Shell commands are blocked: do not try to run tests, scripts or installs, and do not look for virtual environments; the calling agent runs the tests afterwards. Start editing early, and when done reply with a short summary of what you changed.
 
 $PROMPT"
   else
-    PROMPT="You are a read-only helper called by another coding agent. Do not run shell commands and do not edit files. You may read files in the working directory if needed. Reply with your full answer as text (include any code in the reply).
+    PROMPT="You are a read-only helper called by another coding agent. Do not run shell commands and do not edit files. Answer from the content given; read files in the working directory only when essential. Keep it concise and reply with your full answer as text (include any code in the reply).
 
 $PROMPT"
   fi

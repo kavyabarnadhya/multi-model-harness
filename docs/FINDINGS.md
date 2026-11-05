@@ -1,5 +1,24 @@
 # Findings (November 2026)
 
+## Update, 5 Nov 2026: every helper mode failed on real work, and the fixes
+A real session with a ~350-line Python file got timeouts or no output from every mode. Tiny prompts still worked, so the problems only showed up at real size.
+
+| Symptom | Cause | Fix in the wrappers |
+|---|---|---|
+| Grok review/code timed out at 5–15 min with no answer or edits | `--permission-mode plan` puts Grok into its planning workflow in a real repo: `enter_plan_mode`, then `ask_user_question` (never answered headless), then a plan file. Separately, grok-4.7, 4.6 and 4.7-build-fast reasoned for 10+ min on a 350-line review; `--reasoning-effort low` didn't help | No plan mode. Read-only runs get `--tools read_file,grep,list_dir`; worktrees add `search_replace,write` plus the scoped `Edit(...)` rule. Also `--no-plan --no-subagents --disable-web-search`. Default model **grok-4.5** (review in 2–3 min). Limits 10 min, or 15 min for code |
+| Grok explored the whole repo for a piped review | It follows the repo's CLAUDE.md ("read SPEC.md first"), reads tests and so on, which is slow at its speed | Piped input without `--cwd` runs in an empty folder |
+| agy review: no events for 5 min, then a timeout | agy 1.5.1 (auto-updated from 1.4.12) with Flash-**high** never finished; Flash-medium used 63K thinking tokens and took 7 min | Default **gemini-3.8-flash-low** (20–30 s); `--effort medium/high` is opt-in |
+| agy raw "say ok" in plan mode wrote `plan.md` and asked to "Proceed" | agy 1.5 plan mode turns some prompts into an implementation plan | The wrapper's "answer as text" preamble avoids it; a plan reply is reported as `HELPER_ERROR` |
+| agy worktree: `no output produced — a tool required the "read_file"/"command" permission` | A denied tool ends a headless agy turn with no output. It tried to read the repo venv (git-ignored, so outside the worktree) and to run `git diff` | Read-only `git diff/status/log/show` pre-allowed via `--settings`; the prompt says shell is blocked, don't run tests, don't look for venvs |
+| Error text ended in `(e.g. )` | The wrapper cut the message at 200 characters, then added its own `)` | Cut at 400 characters, marked with `...` |
+| Nothing to debug afterwards | No logs | Every run keeps `~/.cache/ask-helpers/runs/<time>-<helper>-<task>/` (prompt, raw stream, run.txt), and failures print `LOG:`. The last 30 runs are kept |
+
+Other notes:
+- A Grok run that streams nothing for 180 s is stopped as `stuck` (the watchdog). Grok's `streaming-json` emits a `thought` every few words, so slow is distinguishable from stuck. agy streams no thinking, so for agy only the overall timeout applies.
+- **Timeouts are not remembered** as unavailable: they depend on the task, not on the account. `--status` shows the last run's result instead.
+- `helper-smoke` checks both helpers end to end (a tiny review plus a worktree task that must produce a one-file diff) in under 2 minutes.
+- Verified after the fixes: the 350-line review took 137 s with Grok and 32 s with Gemini. A real worktree task (unify KB units and add tests) took 47 s with Grok and 63 s with Gemini, and both branches passed the repo's own unittests.
+
 These are things we found while building this on Windows 11. Each was verified by running the tool, unless it says otherwise. The CLIs change often, so re-check before relying on any of this.
 
 ## Gemini CLI no longer works with consumer plans

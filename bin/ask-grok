@@ -12,29 +12,34 @@ usage() {
   echo "Models: review/code grok-4.7, read grok-4.7-build-fast (grok models lists more)"
 }
 
+# Grok streams its reasoning slowly (a 350-line review with repo context takes 3-6 min), so it gets longer limits.
+DEFAULT_TIMEOUT_OTHER=600
+DEFAULT_TIMEOUT_CODE=900
 parse_args "$@"
 check_remembered
 [ -n "$WORKTREE" ] && wt_setup
 sanitize_env
 command -v grok > /dev/null || die_error "grok not found in ~/.grok/bin or PATH"
 
-case "$TASK" in
-  read) MODEL=${MODEL:-grok-4.7-build-fast} ;;
-  *)    MODEL=${MODEL:-grok-4.7} ;;
-esac
+# grok-4.5 answered a 350-line review in 3 min; grok-4.6, grok-4.7 and grok-4.7-build-fast were still
+# thinking after 5-10 min (tested 5 Nov 2026), so 4.5 is the default for every task.
+MODEL=${MODEL:-grok-4.5}
 
-work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
+new_run_dir
 
-# Plan permission mode keeps grok from editing files or running commands. In a worktree, edits are allowed
-# by a rule scoped to that folder: acceptEdits alone still blocks headless edits, and unscoped rules or
-# --sandbox (not enforced on Windows) let grok write anywhere.
+# Read-only runs get only read tools. Not --permission-mode plan: in a real repo that starts grok's planning
+# workflow (enter_plan_mode, ask_user_question, plan file), which a headless run never finishes.
+# In a worktree, edits are allowed by a rule scoped to that folder: acceptEdits alone still blocks headless
+# edits, and unscoped rules or --sandbox (not enforced on Windows) let grok write anywhere.
+args=(--permission-mode default --no-plan --no-subagents --disable-web-search)
 if [ -n "$WORKTREE" ]; then
-  args=(--permission-mode default --allow "Edit($(cygpath -m "$CWD")/**)")
+  args+=(--tools read_file,grep,list_dir,search_replace,write --allow "Edit($(cygpath -m "$CWD")/**)")
 else
-  args=(--permission-mode plan)
+  args+=(--tools read_file,grep,list_dir)
 fi
-args+=(--output-format plain -m "$MODEL" --cwd "$(cygpath -w "$CWD")")
+# streaming-json emits a "thought" event every few words, which lets run_watched tell slow from stuck.
+args+=(--output-format streaming-json -m "$MODEL" --cwd "$(cygpath -w "$CWD")")
+[ -n "$EFFORT" ] && args+=(--reasoning-effort "$EFFORT")
 if [ ${#PROMPT} -gt "$HELPER_ARG_LIMIT" ]; then
   printf '%s' "$PROMPT" > "$work/prompt.md"
   args+=(--prompt-file "$(cygpath -w "$work/prompt.md")")
@@ -42,14 +47,31 @@ else
   args+=(-p "$PROMPT")
 fi
 
-timeout -k 10 "$TIMEOUT" grok "${args[@]}" < /dev/null > "$work/out" 2> "$work/err"
-rc=$?
-case $rc in 124|137) die_unavailable timeout ;; esac
+run_watched grok "${args[@]}"
+[ "$RUN_END" = stuck ] && die_unavailable "stuck: no output for ${IDLE_LIMIT}s"
+[ "$RUN_END" = timeout ] && die_unavailable "timeout after ${TIMEOUT}s"
 
-if [ $rc -eq 0 ] && [ -n "$(tr -d '[:space:]' < "$work/out")" ]; then
-  echo "[grok: $MODEL]"
-  cat "$work/out"
+# Join the "text" events into the answer; keep any "error" event's message.
+err=$(node -e '
+  const fs = require("fs");
+  const [out, resp] = process.argv.slice(1);
+  let text = "", err = "";
+  for (const line of fs.readFileSync(out, "utf8").split("\n")) {
+    let e; try { e = JSON.parse(line); } catch { continue; }
+    if (e.type === "text" && typeof e.data === "string") text += e.data;
+    if (e.type === "error") err = String(e.message || "");
+  }
+  fs.writeFileSync(resp, text);
+  console.log(err.split("\n").join(" "));
+' "$(cygpath -w "$work/out")" "$(cygpath -w "$work/resp")")
+
+if [ "$RUN_RC" -eq 0 ] && [ -z "$err" ] && [ -n "$(tr -d '[:space:]' < "$work/resp")" ]; then
+  echo "[grok: $MODEL${EFFORT:+, effort $EFFORT}]"
+  cat "$work/resp"; echo
   [ -n "$WORKTREE" ] && { echo; wt_finish; }
+  run_note "result: ok"
   exit 0
 fi
-handle_failure "$(cat "$work/out" "$work/err")" "$(first_line "$work/err" "$work/out")"
+run_note "result: failed rc=$RUN_RC"
+# Classify only the error text: the event stream holds the model's thoughts, which can mention "quota" etc.
+handle_failure "$err $(cat "$work/err")" "${err:-$(first_line "$work/err")}"
