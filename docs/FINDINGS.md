@@ -1,5 +1,19 @@
 # Findings (November 2026)
 
+## Update, 10 Nov 2026: agy read-only runs with `--cwd` returned nothing
+`ask-gemini --task read --cwd <repo>` on a repo audit exited 4 with `no output produced — a tool required the "command" permission`. The run log showed one `read_file`, then `run_command` with `Get-ChildItem -Recurse ...`, then an empty result.
+
+| Symptom | Cause | Fix in the wrapper |
+|---|---|---|
+| Empty answer after agy tried to list the repo with a shell command, although the prompt said not to | In `--mode plan` agy's top level has no list or search tool, only `read_file`, `run_command` and subagents, so the shell is its only way to find files. A command that needs approval is auto-denied in headless mode **and that ends the turn** | Read-only runs pass `permissions.deny: ["command(*)"]`. A call that matches a deny rule is refused back to the model and the turn carries on. The wrapper also puts the file list (`git ls-files -co --exclude-standard`, at most 1,500 names, secret-looking names left out) in the prompt, and tells agy: `read_file` only, no subagents, no plan, no questions |
+| Same dead turn can still happen in a worktree run | There only read-only git is pre-allowed; any other command is auto-denied | If a turn ends with an empty response and `denied_actions`, the wrapper continues the same conversation once (`--conversation <id>`) with every command denied by rule. The first attempt is kept as `out.1`/`err.1` |
+
+Notes:
+- **Deny beats allow.** With `deny: ["command(*)"]`, an allowed `command(git status*)` is refused too, so read-only runs have no git. Pipe the diff in instead. Worktree runs keep the git allow-rules and no blanket deny.
+- Without the "no subagents" line, a denied agy hands the job to a research subagent and replies "I will provide the list as soon as it completes", which never arrives in a one-turn headless run.
+- The wrapper never uses `--dangerously-skip-permissions` and adds no allow-rule for general shell commands.
+- Verified on agy 1.5.4: the read call that failed now answers in about 50 s using `read_file` only; a worktree task forced to call `dir` first recovered through the retry; `helper-smoke` passes for both helpers.
+
 ## Update, 5 Nov 2026: every helper mode failed on real work, and the fixes
 A real session with a ~350-line Python file got timeouts or no output from every mode. Tiny prompts still worked, so the problems only showed up at real size.
 
@@ -33,7 +47,7 @@ These are things we found while building this on Windows 11. Each was verified b
 - Run it as `agy -p "..." --output-format json --model ID --print-timeout 300s`. The JSON contains `status`, `response`, `error`, `finished_reason` and `usage`, **but not the model that answered**. Pass `--model` explicitly; headless mode refuses unknown models with exit 1 instead of falling back.
 - ⚠️ A **timeout reports `status:"SUCCESS"` with exit 0**, plus `finished_reason:"print_timeout"` and an empty response. Check `finished_reason`.
 - Even "hi" costs about 7 K input tokens of built-in agent prompt, and calls take 10–70 s.
-- Headless mode cannot prompt for permissions. A tool that needs approval is soft-denied, and the run can end with **no output at all**. Telling the model "do not run shell commands, reply with text" fixed this.
+- Headless mode cannot prompt for permissions. A tool that needs approval is soft-denied, and the run can end with **no output at all**. Telling the model "do not run shell commands, reply with text" helps but is not enough (see the 10 Nov update): a deny rule is what keeps the turn alive.
 - `--mode plan` kept agy read-only. `--mode accept-edits` allowed edits in the working folder, while reads and writes outside it were denied by default.
 - **`useG1Credits` (paid-credit overflow) can't be stored as `false` in settings.json.** agy marks the key `omitempty`, so it deletes `false` and a missing key means off. To be sure, the wrapper passes `--settings '{"useG1Credits":false}'` on every call. agy also rewrites settings.json when an interactive session exits, so edit it only while agy is closed.
 - One agy run sat for 10 minutes in a very long temp folder path. Short paths are fine.

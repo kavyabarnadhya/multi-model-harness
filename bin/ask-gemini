@@ -31,36 +31,91 @@ IDLE_LIMIT=$TIMEOUT
 # the per-run settings forbid paid G1 credits.
 mode=plan
 [ -n "$WORKTREE" ] && mode=accept-edits
-# A denied tool ends a headless agy turn with no output, and agy likes to check its work with git, so
-# read-only git commands are pre-allowed. Everything else that needs approval stays denied.
-settings='{"useG1Credits":false,"permissions":{"allow":["command(git diff*)","command(git status*)","command(git log*)","command(git show*)"]}}'
-args=(--output-format stream-json --model "$MODEL" --mode "$mode"
-      --settings "$settings" --print-timeout "${TIMEOUT}s")
+# In headless mode a tool call that needs approval is auto-denied AND ends the turn with no output.
+# A call that matches a deny rule is instead refused back to the model, which then carries on.
+# - Read-only runs: every shell command is denied by rule (deny beats allow, so no git either). agy's
+#   top level has no list/search tool, only read_file, so the wrapper puts the file list in the prompt.
+# - Worktree runs: agy likes to check its work with git, so read-only git stays allowed; anything else
+#   that needs approval can still end the turn, which the retry below picks up.
+git_allow='"command(git diff*)","command(git status*)","command(git log*)","command(git show*)"'
+settings_deny='{"useG1Credits":false,"permissions":{"deny":["command(*)"]}}'
+if [ -n "$WORKTREE" ]; then
+  settings='{"useG1Credits":false,"permissions":{"allow":['"$git_allow"']}}'
+else
+  settings=$settings_deny
+fi
+
+# File list for read-only runs (names only; secret-looking files are left out).
+list_files() {
+  local d; d=$(cygpath -m "$CWD")
+  if git -C "$d" rev-parse --is-inside-work-tree > /dev/null 2>&1; then
+    git -C "$d" ls-files -co --exclude-standard 2> /dev/null
+  else
+    (cd "$CWD" && find . \( -name .git -o -name node_modules \) -prune -o -type f -print 2> /dev/null | sed 's|^\./||')
+  fi | grep -viE '(^|/)(\.env[^/]*|[^/]*\.(pem|key|jks|keystore|p12)|[^/]*(secret|credential)[^/]*)$'
+}
+FILE_LIST_MAX=1500
+if [ -z "$WORKTREE" ]; then
+  note="Tool rules for this run: run_command is blocked, every call is refused (git too), so never call it. Read files with read_file only. Do not start subagents, do not write a plan file, and do not ask questions or ask to proceed: nobody can answer. Give your complete answer in this one reply."
+  files=$(list_files | head -n $((FILE_LIST_MAX + 1)))
+  if [ -n "$files" ]; then
+    n=$(printf '%s\n' "$files" | wc -l)
+    more=""
+    [ "$n" -gt "$FILE_LIST_MAX" ] && { files=$(printf '%s\n' "$files" | head -n "$FILE_LIST_MAX"); more=" (first $FILE_LIST_MAX only; there are more)"; }
+    note="$note
+Files in the working directory $(cygpath -w "$CWD")$more, paths relative to it:
+$files"
+  fi
+  PROMPT="$note
+
+$PROMPT"
+  printf '%s' "$PROMPT" > "$work/prompt.txt"
+fi
+
+base_args=(--output-format stream-json --model "$MODEL" --mode "$mode" --print-timeout "${TIMEOUT}s")
 if [ ${#PROMPT} -gt "$HELPER_ARG_LIMIT" ]; then
   printf '%s' "$PROMPT" > "$work/prompt.md"
-  args+=(--add-dir "$(cygpath -w "$work")")
+  base_args+=(--add-dir "$(cygpath -w "$work")")
   PROMPT="Your full instructions are in the file $(cygpath -w "$work/prompt.md"). Read that file and follow it."
 fi
 
 cd "$CWD" || die_error "cannot enter $CWD"
-# agy's own --print-timeout ends the turn cleanly; the outer limit is only a backstop.
-TIMEOUT=$((TIMEOUT + 30)) run_watched "$AGY" -p "$PROMPT" "${args[@]}"
-[ "$RUN_END" = timeout ] && die_unavailable "timeout after $((TIMEOUT + 30))s"
 
-# The final "result" event carries status, finished_reason, error and the response.
-meta=$(node -e '
-  const fs = require("fs");
-  const [out, resp] = process.argv.slice(1);
-  let r = null;
-  for (const line of fs.readFileSync(out, "utf8").split("\n")) {
-    try { const e = JSON.parse(line); if (e.event === "result") r = e.result; } catch {}
-  }
-  if (!r) { console.log("NORESULT"); process.exit(0); }
-  fs.writeFileSync(resp, r.response || "");
-  console.log([r.status || "", r.finished_reason || "", String(r.error || "").split("\n").join(" ")].join("\t"));
-' "$(cygpath -w "$work/out")" "$(cygpath -w "$work/resp")")
-IFS=$'\t' read -r status finished err <<< "$meta"
-run_note "result: status=$status finished=$finished"
+# agy_turn PROMPT SETTINGS [extra agy args]: one headless turn. Sets status, finished, conv, denied, err
+# and writes the answer to $work/resp. The final "result" event carries all of them.
+agy_turn() {
+  local p=$1 s=$2 meta; shift 2
+  # agy's own --print-timeout ends the turn cleanly; the outer limit is only a backstop.
+  TIMEOUT=$((TIMEOUT + 30)) run_watched "$AGY" -p "$p" "${base_args[@]}" --settings "$s" "$@"
+  [ "$RUN_END" = timeout ] && die_unavailable "timeout after $((TIMEOUT + 30))s"
+  meta=$(node -e '
+    const fs = require("fs");
+    const [out, resp] = process.argv.slice(1);
+    let r = null;
+    for (const line of fs.readFileSync(out, "utf8").split("\n")) {
+      try { const e = JSON.parse(line); if (e.event === "result") r = e.result; } catch {}
+    }
+    if (!r) { console.log("NORESULT"); process.exit(0); }
+    fs.writeFileSync(resp, r.response || "");
+    const denied = (r.denied_actions || []).map(d => d.action).join(",");
+    console.log([r.status || "", r.finished_reason || "", r.conversation_id || "", denied,
+                 String(r.error || "").split("\n").join(" ")].join("\x1f"));
+  ' "$(cygpath -w "$work/out")" "$(cygpath -w "$work/resp")")
+  # \x1f is not whitespace, so empty fields keep their place.
+  IFS=$'\x1f' read -r status finished conv denied err <<< "$meta"
+  run_note "result: status=$status finished=$finished${denied:+ denied=$denied}"
+}
+
+agy_turn "$PROMPT" "$settings"
+
+# A denied tool ended the turn with nothing said: continue the same conversation once, now with every
+# shell command denied by rule so the turn cannot end that way again.
+if [ "$status" = SUCCESS ] && [ -n "$denied" ] && [ -n "$conv" ] && [ -z "$(tr -d '[:space:]' < "$work/resp")" ]; then
+  run_note "retry: turn ended on a denied tool ($denied); continuing conversation $conv"
+  mv -f "$work/out" "$work/out.1"; mv -f "$work/err" "$work/err.1"
+  agy_turn "Your last tool call was refused and that ended your turn. Shell commands are not available in this session: do not call run_command again, and do not start subagents, write a plan or ask questions. Continue the original task with the tools that work and give your complete answer as text now." \
+    "$settings_deny" --conversation "$conv"
+fi
 
 [ "$finished" = print_timeout ] && die_unavailable "timeout after ${TIMEOUT}s"
 # agy 1.5 plan mode can stop after writing a plan.md and asking to "Proceed" instead of answering.
