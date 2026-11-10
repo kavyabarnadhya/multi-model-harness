@@ -99,7 +99,7 @@ See [docs/FINDINGS.md](docs/FINDINGS.md). It covers the Gemini CLI retirement, a
 
 ## Status
 
-**Last verified: 5 November 2026.** Tested on Windows 11 with Git Bash, Claude Code 2.1.210, agy 1.5.1 and grok 1.0.70.
+**Last verified: 10 November 2026.** Tested on Windows 11 with Git Bash, Claude Code 2.1.210, agy 1.5.4 and grok 1.0.70.
 
 - **Working:** read, review and code tasks for both helpers; worktree mode; quota, timeout and model-error detection; the 5-hour quota memory.
 - **Help wanted: macOS and Linux.** The scripts include fallbacks but haven't been run there. Please open an issue with what you find.
