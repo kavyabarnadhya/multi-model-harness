@@ -10,6 +10,7 @@ Pipe content in: `git diff | ask-grok --task review "Review this diff"`.
 Helpers are read-only unless you use worktree mode (below): they reply with text (including code), and you apply any changes. The first output line names the helper and model. Gemini (Flash-low) takes 15-60 s; Grok (grok-4.5) takes 10 s for tiny jobs and 2-6 min for a few hundred lines, so run helper calls in the background when you have other work to do.
 - Piped content without `--cwd` is answered from the content alone (fast). Add `--cwd <repo>` only when the helper needs repo context; it then explores the repo and takes longer.
 - Helpers can't run shell commands. Never ask them to run tests, installs or scripts; you run the tests afterwards.
+- Read-only Gemini runs have no shell at all, git included: with `--cwd` the wrapper gives Gemini the file list and it reads files only. If it needs a diff or log, pipe it in (`git diff | ask-gemini --task review ...`).
 - Every run keeps a log; failures print `LOG: <folder>` (prompt, raw output, timings). `ask-<helper> --status` shows the last run. Smoke test both helpers with `helper-smoke` (under 2 min).
 
 ## Who does what (defaults)
