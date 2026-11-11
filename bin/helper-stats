@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# helper-stats: token and run usage across Claude Code, ask-grok and ask-gemini.
+# Usage: helper-stats [--days N] [--brief] [--json]     (default: last 7 days)
+LIBDIR=$(dirname "$(readlink -f "$0")")
+command -v cygpath > /dev/null || cygpath() { printf '%s\n' "${@: -1}"; }
+exec node "$(cygpath -w "$LIBDIR/helper-usage.js")" stats "$@"

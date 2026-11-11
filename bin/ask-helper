@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# ask-helper: route a task to the right helper and fall back to the other one when it is unavailable.
+# Usage: ask-helper --task review|read|code [--prefer grok|gemini] [any ask-grok/ask-gemini options] PROMPT...
+# Default order: read -> gemini, grok; review and code -> grok, gemini.
+# Prints "ROUTE: ..." lines saying who was tried, then the answering helper's output.
+# Exit: 0 answered; 3 both unavailable (HELPER_UNAVAILABLE: all (...)); 4 a helper error on the last try.
+
+task=read prefer="" args=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --task)   task=$2; args+=("$1" "$2"); shift 2 ;;
+    --prefer) prefer=$2; shift 2 ;;
+    *)        args+=("$1"); shift ;;
+  esac
+done
+
+case "$task" in
+  read) order=(gemini grok) ;;
+  *)    order=(grok gemini) ;;
+esac
+[ "$prefer" = gemini ] && order=(gemini grok)
+[ "$prefer" = grok ] && order=(grok gemini)
+
+# Keep piped input so the backup helper gets it too.
+. "$(dirname "$(readlink -f "$0")")/helper-lib.sh"
+read_piped_input
+input=""
+if [ -n "$INPUT" ]; then
+  input=$(mktemp)
+  printf '%s' "$INPUT" > "$input"
+  trap 'rm -f "$input"' EXIT
+fi
+
+misses=() rc=3
+for h in "${order[@]}"; do
+  if [ -n "$input" ]; then out=$("ask-$h" "${args[@]}" < "$input"); rc=$?
+  else out=$("ask-$h" "${args[@]}" < /dev/null); rc=$?
+  fi
+  if [ $rc -eq 0 ]; then
+    [ ${#misses[@]} -gt 0 ] && echo "ROUTE: $(IFS=';'; echo "${misses[*]}" | sed 's/;/; /g'); $h answered"
+    printf '%s\n' "$out"
+    exit 0
+  fi
+  # First line is "HELPER_UNAVAILABLE: <h> (<reason>)" or "HELPER_ERROR: <h> (<detail>)".
+  reason=$(printf '%s\n' "$out" | head -1 | sed -E 's/^HELPER_[A-Z]+: [a-z]+ \((.*)\)$/\1/' | cut -c1-120)
+  misses+=("$h unavailable (${reason:-exit $rc})")
+  printf '%s\n' "$out" | grep '^LOG:' | sed "s/^/ROUTE: $h /" >&2
+done
+
+echo "HELPER_UNAVAILABLE: all ($(IFS=';'; echo "${misses[*]}" | sed 's/;/; /g'))"
+[ $rc -eq 4 ] && exit 4
+exit 3

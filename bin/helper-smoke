@@ -39,6 +39,11 @@ for h in "${helpers[@]}"; do
   ask-$h --discard smoke --cwd "$repo" > /dev/null 2>&1
 done
 
+if [ ${#helpers[@]} -eq 2 ]; then
+  check "router review" 120 bash -c "echo 'def add(a, b): return a - b' | ask-helper --task review --timeout 110 'One sentence: is there a bug?'"
+  check "usage stats" 60 helper-stats --brief --days 1
+fi
+
 cd "$HOME" && rm -rf "$repo"
 [ $fails -eq 0 ] && echo "ALL PASS" || echo "$fails FAILED"
 exit $((fails > 0))

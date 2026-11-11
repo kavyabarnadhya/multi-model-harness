@@ -1,33 +1,48 @@
 # Helper models
 
-You (Claude Code) stay in charge. Two helper CLIs can take some jobs, to save Claude quota or get a second opinion. Use them only through these wrappers, from the Bash tool:
+You (Claude Code) are the lead and the strongest model here: you plan, design the architecture, write the code and verify it. Two helper CLIs take support work off you, to save Claude quota and give second opinions. Use them only through these wrappers, from the Bash tool:
 
 - `ask-gemini`: Antigravity CLI (agy) on Google AI Pro. Gemini 3.8 Flash only (no Pro model available).
 - `ask-grok`: Grok Build on the X Plus plan. Its weekly pool is shared with Grok chat, Imagine and Cursor.
 
-Usage: `ask-<helper> --task review|read|code [--cwd DIR] [--timeout SECONDS] [--model ID] "prompt"`
-Pipe content in: `git diff | ask-grok --task review "Review this diff"`.
+- `ask-helper`: router. Picks the helper for the task (read: Gemini first; review/code: Grok first), falls back to the other one, and prints a `ROUTE:` line when it did. Prefer it to calling a helper directly.
+
+Usage: `ask-helper --task review|read|code [--prefer grok|gemini] [--cwd DIR] [--timeout SECONDS] [--model ID] "prompt"` (the same options work on `ask-grok` / `ask-gemini`).
+Pipe content in: `git diff | ask-helper --task review "Review this diff"`.
 Helpers are read-only unless you use worktree mode (below): they reply with text (including code), and you apply any changes. The first output line names the helper and model. Gemini (Flash-low) takes 15-60 s; Grok (grok-4.5) takes 10 s for tiny jobs and 2-6 min for a few hundred lines, so run helper calls in the background when you have other work to do.
 - Piped content without `--cwd` is answered from the content alone (fast). Add `--cwd <repo>` only when the helper needs repo context; it then explores the repo and takes longer.
 - Helpers can't run shell commands. Never ask them to run tests, installs or scripts; you run the tests afterwards.
 - Read-only Gemini runs have no shell at all, git included: with `--cwd` the wrapper gives Gemini the file list and it reads files only. If it needs a diff or log, pipe it in (`git diff | ask-gemini --task review ...`).
 - Every run keeps a log; failures print `LOG: <folder>` (prompt, raw output, timings). `ask-<helper> --status` shows the last run. Smoke test both helpers with `helper-smoke` (under 2 min).
 
-## Who does what (defaults)
-| Job | Default | Backup | Both unavailable |
-|---|---|---|---|
-| Code review / second opinion | ask-grok --task review | ask-gemini --task review (label it "Gemini Flash review") | Review it yourself |
-| Reading a whole repo, long logs or docs | ask-gemini --task read | ask-grok --task read | Read it yourself |
-| Writing a self-contained piece of code (text mode for small snippets, worktree mode otherwise) | ask-grok --task code | ask-gemini --task code | Write it yourself |
+## Roles
+- **You (Claude):** planning, architecture, design decisions, writing the code, debugging fixes, final verification, talking to the user. Never hand these off at level normal or conserve.
+- **Helpers:** work that costs you tokens without needing your judgement:
+  - Reading and exploring (`--task read`): repo surveys, "where is X handled", unfamiliar code, logs, docs, web pages or PDFs over ~300 lines or 3+ files. Ask for a focused summary with file:line references, then read only what you need.
+  - Review (`--task review`): before you report a change as done (roughly 50+ changed lines, or anything touching auth, data deletion, money or migrations). If the review is Gemini's, label it "Gemini Flash review".
+  - Test-failure triage (`--task read`): pipe failing test output (and the relevant code) in, ask for the likely cause. You write the fix.
+  - Prose drafts (`--task read`, Gemini): README sections, PR descriptions, changelogs, docs. You edit before using.
+  - Code (`--task code`): only at level max, or when the user asks ("use Grok for this").
 
-When to use them:
-- Review: before you report a non-trivial change as done (roughly 50+ changed lines, or anything touching auth, data deletion, money or migrations).
-- Read: when the input is too big to read cheaply yourself (a whole repo survey, logs or docs over ~2,000 lines). Ask for a focused summary.
-- Code: a piece with a clear spec and little context (one function, module, script or test file). You review and integrate the result.
+## Usage check and delegation level
+At the start of each task (not every turn), check usage and pick a level:
+1. Your own plan limits: in the desktop app call `mcp__ccd_session_mgmt__get_usage` (5-hour and weekly percent used, reset times). In a plain terminal these aren't available; use level normal unless the user says otherwise.
+2. Helpers: run `helper-stats --brief` (availability, last 7 days of runs and tokens for Claude, Grok and Gemini).
+3. Pick the level, and say it in one line ("Usage: Claude 5h 62%, weekly on pace; helpers OK -> conserve"):
+
+| Level | When | Helpers also take |
+|---|---|---|
+| normal | 5-hour under 50% and weekly on pace | Reading, review, test triage, prose (as above) |
+| conserve | 5-hour 50-80%, or weekly ahead of pace (percent used above the share of the week that has passed) | First drafts of tests and boilerplate (`--task code`, text or worktree), which you review |
+| max | 5-hour over 80%, or weekly over 90% | Any code with a clear spec, in a worktree; you keep planning, architecture, core logic and verification |
+
+- A helper that is out moves its work to the other one (`ask-helper` does this); with both out, do the work yourself.
+- The user's words at task start win: "no helpers", "use Grok", "helpers: max" (or normal / conserve).
+- When the user asks how usage is going, run `helper-stats` (full table) and include your plan limits.
 
 ## Helper code in a worktree
-For a code task over ~30 lines or touching more than one file, use worktree mode instead of text mode:
-`ask-grok --task code --worktree <short-name> --cwd <repo> "<clear spec>"`
+When a helper writes code (level conserve or max, or the user asked) and it is over ~30 lines or touches more than one file, use worktree mode instead of text mode:
+`ask-helper --task code --worktree <short-name> --cwd <repo> "<clear spec>"`
 - Commit your own work first: the helper starts from the last commit and can't see uncommitted changes.
 - The output ends with WORKTREE, BRANCH and a diff stat. Review `git diff HEAD...helper/<name>` and run the tests in the worktree folder (using the repo's own venv if it has one).
 - Good: `git merge --squash helper/<name>`, commit (say which helper wrote it in the message), then `ask-<helper> --discard <name>`.

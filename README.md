@@ -16,11 +16,20 @@ you ──► Claude Code ──┬─► ask-grok   ──► grok -p ...  (X /
 
 ## What you get
 
+**Claude leads.** It plans, designs, writes the code and verifies. The helpers take the support work that costs tokens without needing Claude's judgement:
+
 | Job | Default | Backup | Both unavailable |
 |---|---|---|---|
+| Reading and exploring: repo surveys, logs, docs, test-failure triage, prose drafts | Gemini | Grok | Claude does it |
 | Code review / second opinion | Grok | Gemini Flash (labelled as such) | Claude reviews itself |
-| Reading a whole repo, long logs or docs | Gemini | Grok | Claude reads it |
-| Writing a self-contained piece of code | Grok | Gemini | Claude writes it |
+| Writing code (only when Claude's usage is high, or on request) | Grok | Gemini | Claude writes it |
+
+**Delegation follows real usage.** At the start of a task, Claude checks its own plan limits (5-hour and weekly %, from the desktop app) and `helper-stats --brief`, then picks a level:
+- **normal:** helpers read, review, triage and draft.
+- **conserve:** helpers also draft tests and boilerplate.
+- **max:** helpers write any well-specified code in worktrees; Claude keeps planning, architecture, core logic and verification.
+
+`helper-stats` shows runs and tokens for all three (Claude from its local transcripts, the helpers from a usage ledger) so you can see whether the shift is happening. `ask-helper` routes each task to the right helper and falls back automatically.
 
 What the wrappers do:
 - **Read-only by default.** Gemini runs with `--mode plan` and Grok with `--permission-mode plan`. The helper replies with text and Claude applies any changes.
@@ -48,7 +57,7 @@ Either helper is optional. If you only have one, the fallback rules still work.
      Then run `grok login` and choose the account that holds your subscription. Afterwards, `grok models` should list models.
 2. **Install the wrappers.** Use any folder on Git Bash's PATH; `~/bin` is on it by default.
    ```bash
-   mkdir -p ~/bin && cp bin/* ~/bin/ && chmod +x ~/bin/ask-gemini ~/bin/ask-grok ~/bin/helper-smoke
+   mkdir -p ~/bin && cp bin/* ~/bin/ && chmod +x ~/bin/ask-* ~/bin/helper-*
    ask-gemini --status && ask-grok --status
    ```
 3. **Try a call each:**
@@ -65,6 +74,9 @@ New Claude Code sessions pick up the rules. Override them per repo in that repo'
 ## Usage
 
 ```
+ask-helper --task review|read|code [--prefer grok|gemini] [any ask-<helper> option] PROMPT...
+                                             (routes to a helper, falls back to the other, prints ROUTE:)
+helper-stats [--days N] [--brief] [--json]   (runs and tokens for Claude, Grok and Gemini; default 7 days)
 ask-<helper> [--task review|read|code] [--cwd DIR] [--timeout SECONDS] [--model ID] PROMPT...
 ask-<helper> --task code --worktree NAME [--cwd REPO] PROMPT...
 ask-<helper> --list-worktrees | --discard NAME   [--cwd REPO]
@@ -99,7 +111,7 @@ See [docs/FINDINGS.md](docs/FINDINGS.md). It covers the Gemini CLI retirement, a
 
 ## Status
 
-**Last verified: 10 November 2026.** Tested on Windows 11 with Git Bash, Claude Code 2.1.210, agy 1.5.4 and grok 1.0.70.
+**Last verified: 12 November 2026.** Tested on Windows 11 with Git Bash, Claude Code 2.1.210, agy 1.5.6 and grok 1.0.70.
 
 - **Working:** read, review and code tasks for both helpers; worktree mode; quota, timeout and model-error detection; the 5-hour quota memory.
 - **Help wanted: macOS and Linux.** The scripts include fallbacks but haven't been run there. Please open an issue with what you find.

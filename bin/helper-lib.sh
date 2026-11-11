@@ -14,8 +14,8 @@ AUTH_TTL=$((365 * 24 * 3600))   # effectively "until --reset"
 IDLE_LIMIT=${HELPER_IDLE_LIMIT:-180}   # seconds with no helper output before the run counts as stuck
 RUNS_KEPT=30
 
-die_unavailable() { wt_abort; echo "HELPER_UNAVAILABLE: $HELPER ($1)"; log_hint; exit 3; }
-die_error()       { wt_abort; echo "HELPER_ERROR: $HELPER ($1)"; log_hint; exit 4; }
+die_unavailable() { FAIL_REASON=${1%%[ :,]*}; wt_abort; echo "HELPER_UNAVAILABLE: $HELPER ($1)"; log_hint; exit 3; }
+die_error()       { FAIL_REASON=error; wt_abort; echo "HELPER_ERROR: $HELPER ($1)"; log_hint; exit 4; }
 log_hint() { [ -n "${work:-}" ] && [ -d "$work" ] && echo "LOG: $(cygpath -w "$work")"; }
 # A failed run must not leave a half-made worktree behind.
 wt_abort() { [ -n "${WT_CREATED:-}" ] && { WT_CREATED=""; wt_remove; }; }
@@ -98,10 +98,20 @@ new_run_dir() {
   work="$runs/$(date +%Y%m%d-%H%M%S)-$HELPER-$TASK${WORKTREE:+-$WORKTREE}-$$"
   mkdir -p "$work"
   printf '%s' "$PROMPT" > "$work/prompt.txt"
+  trap 'ledger_record $?' EXIT
   ls -1d "$runs"/*/ 2> /dev/null | sort | head -n -"$RUNS_KEPT" | while read -r old; do rm -rf "$old"; done
 }
 
 run_note() { echo "$(date +%H:%M:%S) $*" >> "$work/run.txt"; }
+
+# On exit, add this run to the long-term usage ledger read by helper-stats (run folders are pruned).
+ledger_record() {
+  [ -n "${work:-}" ] && [ -d "$work" ] || return 0
+  # The wrappers turn MSYS path conversion off, so hand node a native state path.
+  HELPER_STATE_DIR="$(cygpath -w "$HELPER_STATE_DIR")" \
+    node "$(cygpath -w "$LIBDIR/helper-usage.js")" record "$(cygpath -w "$work")" \
+    "$HELPER" "$TASK" "${MODEL:-}" "$1" "${FAIL_REASON:-}" > /dev/null 2>&1 || true
+}
 
 # run_watched CMD...: stdout -> $work/out, stderr -> $work/err. Stops the run at $TIMEOUT seconds, or
 # after $IDLE_LIMIT seconds in which neither file grew. Sets RUN_RC and RUN_END (ok|timeout|stuck).
@@ -135,6 +145,18 @@ short_detail() {
 }
 
 first_line() { cat "$@" 2>/dev/null | grep -m1 -v '^[[:space:]]*$'; }
+
+# Sets INPUT to piped or redirected stdin. An agent harness can leave stdin as an open pipe that never
+# sends anything, which would block a plain cat forever, so a pipe gets 5 s to deliver its first line.
+read_piped_input() {
+  INPUT=""
+  if [ -f /dev/stdin ]; then INPUT=$(cat); return 0; fi
+  [ -p /dev/stdin ] || return 0
+  local first=""
+  if IFS= read -r -t 5 first || [ -n "$first" ]; then
+    INPUT="$first"$'\n'"$(cat)"
+  fi
+}
 
 # --- arguments ---
 
@@ -187,10 +209,10 @@ parse_args() {
     wt_check_name
   fi
   # Append piped or redirected input (e.g. git diff | ask-grok ...); never block on a terminal or /dev/null.
-  if [ -p /dev/stdin ] || [ -f /dev/stdin ]; then
-    local input
-    input=$(cat)
-    [ -n "$input" ] && PROMPT="${PROMPT:+$PROMPT$'\n\n'}$input"
+  read_piped_input
+  if [ -n "$INPUT" ]; then
+    local input=$INPUT
+    PROMPT="${PROMPT:+$PROMPT$'\n\n'}$input"
     # Piped content without --cwd: answer from it alone. In a repo, helpers otherwise explore it
     # (CLAUDE.md, specs, tests) and a slow model runs out of time.
     if [ -n "$input" ] && [ -z "$CWD_GIVEN" ] && [ -z "$WORKTREE" ]; then
