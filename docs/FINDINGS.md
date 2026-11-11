@@ -1,5 +1,15 @@
 # Findings (November 2026)
 
+## Update, 12 Nov 2026: usage tracking and usage-based delegation
+- **Baseline:** one week of normal use (5–12 Nov) shows Claude producing about 2.9M output tokens. Over the same week Grok ran 19 jobs (209K output) and Gemini 11 (5K output): **helpers wrote about 7% of all output**, almost all of it reviews. That's the number `helper-stats` now tracks.
+- **Where the data comes from:**
+  - **Claude:** token counts from the local transcripts (`~/.claude/projects/**/*.jsonl`, each message counted once). The plan's 5-hour/weekly % is only available inside the desktop app (`get_usage`), not from a shell.
+  - **Grok:** one `usage` event per turn in `streaming-json`. The X plan's % is only on X's website, so a `402` is the signal that it's empty.
+  - **Gemini (agy):** one `result.usage` per turn in `stream-json`. agy shows its % only interactively (`/usage`).
+- **Ledger:** the wrappers keep only the last 30 run folders, so each run now appends one line to `~/.cache/ask-helpers/usage.jsonl` on exit (an EXIT trap), including why it failed. `helper-stats` also backfills from run folders that aren't in the ledger yet.
+- **Trap: a stdin pipe that never closes.** An agent harness can give a command an open stdin pipe that never delivers data, and a plain `cat` then blocks forever. The wrappers and `ask-helper` now give a pipe 5 s to deliver its first line, and treat silence as no input.
+- **Trap: node and MSYS paths.** With `MSYS_NO_PATHCONV=1` set, MSYS-style paths in environment variables reach node unconverted (`/c/tmp/x` becomes `C:\c\tmp\x`). Paths are converted with `cygpath -w` before calling node.
+
 ## Update, 10 Nov 2026: agy read-only runs with `--cwd` returned nothing
 `ask-gemini --task read --cwd <repo>` on a repo audit exited 4 with `no output produced — a tool required the "command" permission`. The run log showed one `read_file`, then `run_command` with `Get-ChildItem -Recurse ...`, then an empty result.
 
